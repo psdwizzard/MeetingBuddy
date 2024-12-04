@@ -1,3 +1,4 @@
+import customtkinter
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import threading
@@ -7,23 +8,33 @@ import numpy as np
 import pyperclip
 import os
 import datetime
+import torch
+import queue
+
+# Set appearance mode and color theme
+customtkinter.set_appearance_mode("dark")
+customtkinter.set_default_color_theme("blue")
 
 # Global variables
-loaded_model = None  # To store the loaded model
-is_listening = False
 recording_stream = None
 audio_data = []
+is_listening = False
 meeting_running = False
 meeting_audio_data = []
 meeting_start_time = None
 meeting_thread = None
+preloaded_model = None
+live_transcribing = False
+live_audio_queue = queue.Queue()
+live_transcribe_thread = None
+stop_event = threading.Event()
 
 def start_recording(event=None):
     global recording_stream, audio_data, is_listening
     if is_listening:
         return
     is_listening = True
-    listen_button.config(text="Listening...")
+    listen_button.configure(text="Listening...")
     app.update()
     fs = 16000  # Sample rate
     audio_data = []
@@ -40,7 +51,7 @@ def stop_recording(event=None):
         return
     recording_stream.stop()
     recording_stream.close()
-    listen_button.config(text="Listen")
+    listen_button.configure(text="Listen")
     app.update()
     is_listening = False
 
@@ -49,7 +60,6 @@ def stop_recording(event=None):
     threading.Thread(target=transcribe_audio, args=(audio,)).start()
 
 def transcribe_audio(audio, save_to_file=False, filename=None):
-    global loaded_model
     try:
         disable_buttons()
         text_output.delete(1.0, tk.END)
@@ -58,20 +68,20 @@ def transcribe_audio(audio, save_to_file=False, filename=None):
 
         selected_model = model_var.get()
 
-        # Check if the model is loaded and matches the selected model
-        if loaded_model and loaded_model['name'] == selected_model:
-            model = loaded_model['model']
+        # Decide whether to use CUDA or CPU based on the checkbox
+        device = 'cuda' if use_cuda_var.get() and torch.cuda.is_available() else 'cpu'
+
+        if keep_model_loaded_var.get() and preloaded_model is not None:
+            model = preloaded_model
         else:
-            text_output.delete(1.0, tk.END)
-            text_output.insert(tk.END, "Loading model...")
-            app.update()
             model = whisper.load_model(selected_model)
-            # If "Keep Model Loaded" is enabled, store the model
-            if keep_model_loaded.get():
-                loaded_model = {'name': selected_model, 'model': model}
+            model = model.to(device)
+
+        # Convert audio to tensor and move to the selected device
+        audio_tensor = torch.from_numpy(audio).float().to(device)
 
         # Transcribe the audio
-        result = model.transcribe(audio.flatten(), fp16=False)
+        result = model.transcribe(audio_tensor.flatten(), fp16=device=='cuda')
         transcription = result['text']
         text_output.delete(1.0, tk.END)
         text_output.insert(tk.END, transcription)
@@ -91,14 +101,52 @@ def copy_text():
         messagebox.showwarning("Warning", "No text to copy.")
 
 def disable_buttons():
-    listen_button.config(state=tk.DISABLED)
-    start_meeting_button.config(state=tk.DISABLED)
-    end_meeting_button.config(state=tk.DISABLED)
+    listen_button.configure(state=tk.DISABLED)
+    start_meeting_button.configure(state=tk.DISABLED)
+    end_meeting_button.configure(state=tk.DISABLED)
+    live_transcribe_button.configure(state=tk.DISABLED)
+    stop_live_button.configure(state=tk.DISABLED)
 
 def enable_buttons():
-    listen_button.config(state=tk.NORMAL)
-    start_meeting_button.config(state=tk.NORMAL)
-    end_meeting_button.config(state=tk.NORMAL)
+    listen_button.configure(state=tk.NORMAL)
+    start_meeting_button.configure(state=tk.NORMAL)
+    end_meeting_button.configure(state=tk.NORMAL)
+    live_transcribe_button.configure(state=tk.NORMAL)
+    stop_live_button.configure(state=tk.NORMAL)
+
+def load_model(model_name):
+    global preloaded_model
+    print(f"Loading model: {model_name}")
+
+    # Decide whether to use CUDA or CPU based on the checkbox
+    device = 'cuda' if use_cuda_var.get() and torch.cuda.is_available() else 'cpu'
+
+    preloaded_model = whisper.load_model(model_name)
+    preloaded_model = preloaded_model.to(device)
+
+def unload_model():
+    global preloaded_model
+    print("Unloading model")
+    del preloaded_model
+    preloaded_model = None
+    torch.cuda.empty_cache()
+
+def on_keep_model_loaded_change():
+    if keep_model_loaded_var.get():
+        selected_model = model_var.get()
+        load_model(selected_model)
+    else:
+        unload_model()
+
+def on_model_change(selected_model):
+    if keep_model_loaded_var.get():
+        load_model(selected_model)
+
+def on_use_cuda_change():
+    # Reload the model to switch between CUDA and CPU
+    if keep_model_loaded_var.get():
+        selected_model = model_var.get()
+        load_model(selected_model)
 
 def start_meeting():
     global meeting_audio_data, meeting_start_time, meeting_thread, meeting_running
@@ -108,8 +156,8 @@ def start_meeting():
     meeting_running = True
     meeting_start_time = datetime.datetime.now()
     meeting_audio_data = []
-    start_meeting_button.config(state=tk.DISABLED)
-    end_meeting_button.config(state=tk.NORMAL)
+    start_meeting_button.configure(state=tk.DISABLED)
+    end_meeting_button.configure(state=tk.NORMAL)
     text_output.delete(1.0, tk.END)
     text_output.insert(tk.END, "Meeting started...")
     app.update()
@@ -122,8 +170,8 @@ def end_meeting():
         messagebox.showwarning("Warning", "No meeting is currently running.")
         return
     meeting_running = False
-    end_meeting_button.config(state=tk.DISABLED)
-    start_meeting_button.config(state=tk.NORMAL)
+    end_meeting_button.configure(state=tk.DISABLED)
+    start_meeting_button.configure(state=tk.NORMAL)
     text_output.insert(tk.END, "\nMeeting ended. Transcribing...")
     app.update()
 
@@ -156,64 +204,179 @@ def save_transcription(transcription, filepath):
         f.write(transcription)
     messagebox.showinfo("Saved", f"Transcription saved to {filepath}")
 
-def on_model_change(*args):
-    global loaded_model
-    selected_model = model_var.get()
-    if keep_model_loaded.get():
-        # If a model is loaded and the selected model is different, unload it
-        if loaded_model and loaded_model['name'] != selected_model:
-            loaded_model = None  # Unload the model
+def start_live_transcription():
+    global live_transcribing, live_audio_queue, live_transcribe_thread, recording_stream, stop_event
+    if live_transcribing:
+        messagebox.showwarning("Warning", "Live transcription is already running.")
+        return
 
-def on_keep_model_change(*args):
-    global loaded_model
-    if not keep_model_loaded.get():
-        loaded_model = None  # Unload the model
+    live_transcribing = True
+    stop_event.clear()
+    live_transcribe_button.configure(state=tk.DISABLED)
+    stop_live_button.configure(state=tk.NORMAL)
+    text_output.delete(1.0, tk.END)
+    text_output.insert(tk.END, "Live transcription started...")
+    app.update()
+
+    fs = 16000  # Sample rate
+
+    def audio_callback(indata, frames, time, status):
+        live_audio_queue.put(indata.copy())
+
+    recording_stream = sd.InputStream(samplerate=fs, channels=1, callback=audio_callback)
+    recording_stream.start()
+
+    live_transcribe_thread = threading.Thread(target=process_live_audio)
+    live_transcribe_thread.start()
+
+def stop_live_transcription():
+    global live_transcribing, recording_stream, stop_event
+    if not live_transcribing:
+        messagebox.showwarning("Warning", "No live transcription is running.")
+        return
+
+    live_transcribing = False
+    stop_event.set()
+
+    # Stop the recording stream safely
+    if recording_stream is not None:
+        recording_stream.stop()
+        recording_stream.close()
+        recording_stream = None
+
+    # Wait for the transcription thread to finish
+    if live_transcribe_thread is not None:
+        live_transcribe_thread.join()
+        live_transcribe_thread = None
+
+    live_transcribe_button.configure(state=tk.NORMAL)
+    stop_live_button.configure(state=tk.DISABLED)
+    text_output.insert(tk.END, "\nLive transcription stopped.")
+    app.update()
+
+def process_live_audio():
+    global live_transcribing
+    buffer_duration = 5  # Seconds
+    buffer_size = int(16000 * buffer_duration)
+    audio_buffer = np.zeros((0, 1), dtype=np.float32)
+
+    selected_model = model_var.get()
+    device = 'cuda' if use_cuda_var.get() and torch.cuda.is_available() else 'cpu'
+
+    if keep_model_loaded_var.get() and preloaded_model is not None:
+        model = preloaded_model
+    else:
+        model = whisper.load_model(selected_model)
+        model = model.to(device)
+
+    while not stop_event.is_set():
+        try:
+            # Collect audio data from the queue
+            while not live_audio_queue.empty():
+                data = live_audio_queue.get()
+                audio_buffer = np.vstack((audio_buffer, data))
+
+            # If buffer is large enough, transcribe
+            if len(audio_buffer) >= buffer_size:
+                # Prepare audio chunk
+                audio_chunk = audio_buffer[:buffer_size]
+                audio_buffer = audio_buffer[buffer_size:]
+
+                # Convert audio to tensor and move to device
+                audio_tensor = torch.from_numpy(audio_chunk.flatten()).float().to(device)
+
+                # Transcribe audio chunk
+                result = model.transcribe(audio_tensor, fp16=device=='cuda')
+                transcription = result['text']
+
+                # Update text output in the main thread
+                text_output.insert(tk.END, transcription + " ")
+                text_output.see(tk.END)
+                app.update()
+            else:
+                # Wait a bit before checking again
+                threading.Event().wait(0.1)
+        except Exception as e:
+            if not stop_event.is_set():
+                messagebox.showerror("Error", str(e))
+            break
+
+    # Process any remaining audio in the buffer
+    if len(audio_buffer) > 0:
+        try:
+            audio_tensor = torch.from_numpy(audio_buffer.flatten()).float().to(device)
+            result = model.transcribe(audio_tensor, fp16=device=='cuda')
+            transcription = result['text']
+            text_output.insert(tk.END, transcription)
+            text_output.see(tk.END)
+            app.update()
+        except Exception as e:
+            if not stop_event.is_set():
+                messagebox.showerror("Error", str(e))
 
 # Initialize the main application window
-app = tk.Tk()
+app = customtkinter.CTk()
 app.title("Whisper Mic App")
 
-# Dropdown for selecting the model
+# Model selection dropdown and checkboxes at the top
 model_var = tk.StringVar(value="base")
-models = ["tiny", "base", "small", "medium", "large", "turbo"]  # Added "turbo" to the list
-model_dropdown = tk.OptionMenu(app, model_var, *models)
-model_dropdown.pack(pady=10)
+model_dropdown = customtkinter.CTkOptionMenu(
+    app, variable=model_var, values=["tiny", "base", "small", "medium", "large", "turbo"], command=on_model_change
+)
+model_dropdown.grid(row=0, column=0, columnspan=2, pady=10, padx=10, sticky="ew")
 
-# Checkbox to keep the model loaded
-keep_model_loaded = tk.BooleanVar(value=False)
-keep_model_checkbox = tk.Checkbutton(app, text="Keep Model Loaded", variable=keep_model_loaded)
-keep_model_checkbox.pack(pady=5)
+keep_model_loaded_var = tk.BooleanVar()
+keep_model_loaded_var.set(False)
+keep_model_loaded_checkbox = customtkinter.CTkCheckBox(
+    app, text="Keep model loaded", variable=keep_model_loaded_var, command=on_keep_model_loaded_change
+)
+keep_model_loaded_checkbox.grid(row=1, column=0, pady=5, padx=10, sticky="w")
 
-# Bind the model change event
-model_var.trace('w', on_model_change)
-keep_model_loaded.trace('w', on_keep_model_change)
+use_cuda_var = tk.BooleanVar()
+use_cuda_var.set(torch.cuda.is_available())
+use_cuda_checkbox = customtkinter.CTkCheckBox(
+    app, text="Use CUDA (GPU)", variable=use_cuda_var, command=on_use_cuda_change
+)
+use_cuda_checkbox.grid(row=1, column=1, pady=5, padx=10, sticky="w")
 
-# Frame for buttons
-button_frame = tk.Frame(app)
-button_frame.pack(pady=10)
+# Create frames for grid layout
+button_frame = customtkinter.CTkFrame(app)
+text_frame = customtkinter.CTkFrame(app)
 
-# Listen button
-listen_button = tk.Button(button_frame, text="Listen")
-listen_button.grid(row=0, column=0, padx=5)
+button_frame.grid(row=2, column=0, sticky="ns")
+text_frame.grid(row=2, column=1, sticky="nsew")
 
-# Start Meeting button
-start_meeting_button = tk.Button(button_frame, text="Start Meeting", command=start_meeting)
-start_meeting_button.grid(row=0, column=1, padx=5)
+# Configure grid weights for responsiveness
+app.grid_rowconfigure(2, weight=1)
+app.grid_columnconfigure(1, weight=1)
 
-# End Meeting button
-end_meeting_button = tk.Button(button_frame, text="End Meeting", command=end_meeting, state=tk.DISABLED)
-end_meeting_button.grid(row=0, column=2, padx=5)
-
-# Bind press and release events to the Listen button
+# Add buttons to the left frame
+listen_button = customtkinter.CTkButton(button_frame, text="Listen")
+listen_button.pack(pady=5, padx=10, fill="x")
 listen_button.bind('<ButtonPress-1>', start_recording)
 listen_button.bind('<ButtonRelease-1>', stop_recording)
 
-# Text output area
-text_output = scrolledtext.ScrolledText(app, wrap=tk.WORD, width=50, height=10)
-text_output.pack(padx=10, pady=10)
+start_meeting_button = customtkinter.CTkButton(button_frame, text="Start Meeting", command=start_meeting)
+start_meeting_button.pack(pady=5, padx=10, fill="x")
 
-# Copy button
-copy_button = tk.Button(app, text="Copy", command=copy_text)
-copy_button.pack(pady=10)
+end_meeting_button = customtkinter.CTkButton(button_frame, text="End Meeting", command=end_meeting)
+end_meeting_button.pack(pady=5, padx=10, fill="x")
+
+live_transcribe_button = customtkinter.CTkButton(button_frame, text="Live Transcribe", command=start_live_transcription)
+live_transcribe_button.pack(pady=5, padx=10, fill="x")
+
+stop_live_button = customtkinter.CTkButton(button_frame, text="Stop Live", command=stop_live_transcription)
+stop_live_button.pack(pady=5, padx=10, fill="x")
+stop_live_button.configure(state=tk.DISABLED)
+
+copy_button = customtkinter.CTkButton(button_frame, text="Copy", command=copy_text)
+copy_button.pack(pady=5, padx=10, fill="x")
+
+# Add text box to the right frame
+text_output = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, bg="#333", fg="white")
+text_output.pack(fill="both", expand=True, padx=10, pady=10)
+
+# Load model if checkbox is checked at startup
+on_keep_model_loaded_change()
 
 app.mainloop()
