@@ -682,7 +682,7 @@ def save_old_meeting():
 
 # -------------------- Main Application Window and Tab Layout --------------------
 app = customtkinter.CTk()
-app.title("Whisper Mic App with Ollama and OpenAI Integration")
+app.title("MeetingBuddy")
 
 default_model_var = tk.StringVar(app, value="base")
 default_keep_model_loaded_var = tk.BooleanVar(app, value=False)
