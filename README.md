@@ -35,7 +35,7 @@ pip install -U openai-whisper
 pip install sounddevice
 pip install numpy
 pip install pyperclip
-pip install openai==.028
+pip install openai==0.028
 ```
 
 4. Run the application:
