@@ -60,12 +60,16 @@ venv\Scripts\activate
 ### Install Required Packages
 ```bash
 pip install customtkinter
+pip install pillow
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install -U openai-whisper
 pip install sounddevice
 pip install numpy
 pip install pyperclip
 pip install openai==0.028
+pip install python-docx
+pip install fpdf
+pip install requests
 ```
 
 ### Run the Application
